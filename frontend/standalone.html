@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>实时电商订单监控</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/echarts@5/dist/echarts.min.js"></script>
+    <style>
+      :root {
+        color: #172033;
+        background: #eef3f8;
+        font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #eef3f8; }
+      .dashboard { width: min(1480px, calc(100% - 40px)); margin: 0 auto; padding: 28px 0 36px; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
+      .eyebrow { margin: 0 0 6px; color: #0f766e; font-size: 13px; font-weight: 700; }
+      h1, h2 { margin: 0; letter-spacing: 0; }
+      h1 { color: #111827; font-size: 28px; line-height: 1.25; }
+      h2 { color: #1f2937; font-size: 16px; line-height: 1.35; }
+      .status { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border: 1px solid #d8e0ea; border-radius: 8px; background: #fff; color: #475569; font-size: 14px; white-space: nowrap; }
+      .status-dot { width: 9px; height: 9px; border-radius: 50%; background: #ef4444; }
+      .status-dot.ok { background: #10b981; }
+      .metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 14px; }
+      .metric-card, .panel { border: 1px solid #d9e2ed; border-radius: 8px; background: #fff; box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06); }
+      .metric-card { min-height: 124px; padding: 18px; display: flex; flex-direction: column; justify-content: space-between; }
+      .metric-card span, .metric-card small { color: #64748b; font-size: 13px; }
+      .metric-card strong { color: #0f172a; font-size: 27px; line-height: 1.2; }
+      .metric-card .time-value { font-size: 18px; }
+      .chart-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+      .panel { min-width: 0; overflow: hidden; }
+      .panel-heading { display: flex; align-items: center; min-height: 48px; padding: 0 16px; border-bottom: 1px solid #e5edf6; }
+      .chart { width: 100%; height: 310px; }
+      .table-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+      table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
+      th, td { padding: 11px 12px; border-bottom: 1px solid #edf2f7; color: #334155; text-align: left; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      th { color: #64748b; background: #f8fafc; font-weight: 700; }
+      .tag { display: inline-flex; align-items: center; justify-content: center; min-width: 70px; height: 24px; padding: 0 8px; border-radius: 6px; font-size: 12px; font-weight: 700; }
+      .tag.success { color: #047857; background: #d1fae5; }
+      .tag.warning { color: #92400e; background: #fef3c7; }
+      .tag.danger { color: #b91c1c; background: #fee2e2; }
+      @media (max-width: 1120px) {
+        .metrics-grid, .chart-grid, .table-grid { grid-template-columns: 1fr 1fr; }
+        .chart-grid .wide { grid-column: 1 / -1; }
+      }
+      @media (max-width: 720px) {
+        .dashboard { width: min(100% - 24px, 1480px); padding-top: 18px; }
+        .topbar { align-items: flex-start; flex-direction: column; }
+        h1 { font-size: 23px; }
+        .metrics-grid, .chart-grid, .table-grid { grid-template-columns: 1fr; }
+        .chart { height: 280px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <main class="dashboard">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">PyFlink 实时计算大屏</p>
+            <h1>电商订单监控与异常交易预警</h1>
+          </div>
+          <div class="status"><span :class="['status-dot', healthy ? 'ok' : '']"></span><span>{{ healthy ? '后端在线' : '连接中断' }}</span></div>
+        </header>
+
+        <section class="metrics-grid">
+          <article class="metric-card"><span>累计订单</span><strong>{{ formatInteger(summary.total_orders) }}</strong><small>最新窗口 {{ formatInteger(summary.latest_window_orders) }} 单</small></article>
+          <article class="metric-card"><span>累计销售额</span><strong>¥{{ formatMoney(summary.total_sales) }}</strong><small>最新窗口 ¥{{ formatMoney(summary.latest_window_sales) }}</small></article>
+          <article class="metric-card"><span>异常告警</span><strong>{{ formatInteger(summary.alert_count) }}</strong><small>大额 / 支付 / 设备 / IP / 高频</small></article>
+          <article class="metric-card"><span>最新窗口结束</span><strong class="time-value">{{ summary.latest_window_end || '--' }}</strong><small>Flink 最新聚合窗口</small></article>
+        </section>
+
+        <section class="chart-grid">
+          <div class="panel wide"><div class="panel-heading"><h2>实时销售额趋势</h2></div><div id="sales-chart" class="chart"></div></div>
+          <div class="panel"><div class="panel-heading"><h2>热门商品</h2></div><div id="product-chart" class="chart"></div></div>
+          <div class="panel"><div class="panel-heading"><h2>城市销售分布</h2></div><div id="city-chart" class="chart"></div></div>
+        </section>
+
+        <section class="table-grid">
+          <div class="panel">
+            <div class="panel-heading"><h2>最新订单</h2></div>
+            <table>
+              <thead><tr><th>订单</th><th>商品</th><th>城市</th><th>金额</th><th>状态</th></tr></thead>
+              <tbody>
+                <tr v-for="order in latestOrders" :key="order.order_id">
+                  <td>{{ order.order_id }}</td><td>{{ order.product_name }}</td><td>{{ order.city }}</td><td>¥{{ formatMoney(order.amount) }}</td>
+                  <td><span :class="['tag', order.payment_status === 'SUCCESS' ? 'success' : 'warning']">{{ order.payment_status }}</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="panel">
+            <div class="panel-heading"><h2>异常告警</h2></div>
+            <table>
+              <thead><tr><th>风险</th><th>用户</th><th>类型</th><th>原因</th></tr></thead>
+              <tbody>
+                <tr v-for="alert in alerts" :key="alert.alert_id">
+                  <td><span :class="['tag', alert.risk_level === 'HIGH' ? 'danger' : 'warning']">{{ alert.risk_level }}</span></td>
+                  <td>{{ alert.user_id }}</td><td>{{ alert.alert_type }}</td><td>{{ alert.reason }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const { createApp, nextTick } = Vue
+
+      createApp({
+        data() {
+          return {
+            summary: { total_orders: 0, total_sales: 0, alert_count: 0, latest_window_orders: 0, latest_window_sales: 0, latest_window_end: null },
+            salesTrend: [],
+            topProducts: [],
+            cityDistribution: [],
+            latestOrders: [],
+            alerts: [],
+            healthy: false,
+            charts: {},
+            timer: null,
+          }
+        },
+        mounted() {
+          nextTick(() => {
+            this.charts.sales = echarts.init(document.getElementById('sales-chart'))
+            this.charts.product = echarts.init(document.getElementById('product-chart'))
+            this.charts.city = echarts.init(document.getElementById('city-chart'))
+            this.refresh()
+            this.timer = window.setInterval(this.refresh, 3000)
+            window.addEventListener('resize', this.resizeCharts)
+          })
+        },
+        beforeUnmount() {
+          window.clearInterval(this.timer)
+          window.removeEventListener('resize', this.resizeCharts)
+        },
+        methods: {
+          formatMoney(value) {
+            return Number(value || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+          },
+          formatInteger(value) {
+            return Number(value || 0).toLocaleString('zh-CN')
+          },
+          async apiGet(path) {
+            const response = await fetch(path)
+            if (!response.ok) throw new Error(`Request failed: ${response.status}`)
+            return response.json()
+          },
+          async refresh() {
+            try {
+              const [health, summary, trend, products, cities, orders, alerts] = await Promise.all([
+                this.apiGet('/api/health'),
+                this.apiGet('/api/metrics/summary'),
+                this.apiGet('/api/metrics/sales-trend?limit=24'),
+                this.apiGet('/api/metrics/top-products?limit=8'),
+                this.apiGet('/api/metrics/city-distribution'),
+                this.apiGet('/api/orders/latest?limit=10'),
+                this.apiGet('/api/alerts?limit=10'),
+              ])
+              this.healthy = health.status === 'ok'
+              this.summary = summary
+              this.salesTrend = trend
+              this.topProducts = products
+              this.cityDistribution = cities
+              this.latestOrders = orders
+              this.alerts = alerts
+              this.renderCharts()
+            } catch (error) {
+              this.healthy = false
+              console.error(error)
+            }
+          },
+          renderCharts() {
+            this.charts.sales.setOption({
+              color: ['#2563eb'],
+              tooltip: { trigger: 'axis' },
+              grid: { left: 48, right: 24, top: 32, bottom: 36 },
+              xAxis: { type: 'category', data: this.salesTrend.map((item) => item.time?.slice(11) || item.time), axisLabel: { color: '#5f6b7a' } },
+              yAxis: { type: 'value', axisLabel: { color: '#5f6b7a' }, splitLine: { lineStyle: { color: '#e7edf5' } } },
+              series: [{ name: '销售额', type: 'line', smooth: true, symbolSize: 7, areaStyle: { color: 'rgba(37, 99, 235, 0.12)' }, data: this.salesTrend.map((item) => item.total_amount) }],
+            })
+            this.charts.product.setOption({
+              color: ['#0f766e'],
+              tooltip: { trigger: 'axis' },
+              grid: { left: 56, right: 18, top: 28, bottom: 72 },
+              xAxis: { type: 'category', data: this.topProducts.map((item) => item.product_name), axisLabel: { color: '#5f6b7a', rotate: 35 } },
+              yAxis: { type: 'value', axisLabel: { color: '#5f6b7a' }, splitLine: { lineStyle: { color: '#e7edf5' } } },
+              series: [{ name: '销售额', type: 'bar', barWidth: 18, data: this.topProducts.map((item) => item.total_amount) }],
+            })
+            this.charts.city.setOption({
+              color: ['#2563eb', '#0f766e', '#f59e0b', '#dc2626', '#7c3aed', '#0891b2', '#65a30d', '#db2777'],
+              tooltip: { trigger: 'item' },
+              series: [{ name: '城市销售额', type: 'pie', radius: ['42%', '70%'], center: ['50%', '52%'], label: { color: '#334155', formatter: '{b}' }, data: this.cityDistribution.map((item) => ({ name: item.city, value: item.total_amount })) }],
+            })
+          },
+          resizeCharts() {
+            Object.values(this.charts).forEach((chart) => chart.resize())
+          },
+        },
+      }).mount('#app')
+    </script>
+  </body>
+</html>
