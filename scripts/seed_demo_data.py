@@ -10,10 +10,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.database import DB_PATH, init_db  # noqa: E402
-from generator.order_stream_generator import CITIES, PRODUCTS, RISKY_DEVICES, RISKY_IPS, make_order  # noqa: E402
-
-
-HIGH_AMOUNT_THRESHOLD = 5000
+from flink_jobs.order_stream_job import (  # noqa: E402
+    DEVICE_ID,
+    EVENT_TIME,
+    IP_ADDRESS,
+    USER_ID,
+    build_order_alert,
+    build_shared_identity_alerts,
+    build_user_behavior_alerts,
+    format_millis,
+    has_order_alert,
+    parse_event_time_millis,
+)
+from generator.order_stream_generator import CITIES, PRODUCTS, make_order  # noqa: E402
 
 
 def reset_tables(conn: sqlite3.Connection) -> None:
@@ -28,7 +37,37 @@ def reset_tables(conn: sqlite3.Connection) -> None:
     )
 
 
-def insert_order(conn: sqlite3.Connection, order: dict) -> None:
+def order_to_tuple(order: dict) -> tuple:
+    return (
+        order["order_id"],
+        order["user_id"],
+        order["product_id"],
+        order["product_name"],
+        order["category"],
+        order["city"],
+        order["amount"],
+        order["quantity"],
+        order["payment_status"],
+        order["device_id"],
+        order["ip_address"],
+        order["event_time"],
+    )
+
+
+def insert_alert(conn: sqlite3.Connection, alert: tuple) -> None:
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO alerts (
+            alert_id, order_id, user_id, alert_type, risk_level, reason, amount, event_time
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        alert,
+    )
+
+
+def insert_order(conn: sqlite3.Connection, order: dict) -> tuple:
+    order_row = order_to_tuple(order)
     conn.execute(
         """
         INSERT OR IGNORE INTO orders (
@@ -37,63 +76,69 @@ def insert_order(conn: sqlite3.Connection, order: dict) -> None:
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (
-            order["order_id"],
-            order["user_id"],
-            order["product_id"],
-            order["product_name"],
-            order["category"],
-            order["city"],
-            order["amount"],
-            order["quantity"],
-            order["payment_status"],
-            order["device_id"],
-            order["ip_address"],
-            order["event_time"],
-        ),
+        order_row,
     )
 
-    alert_types = []
-    reasons = []
-    risk_level = "MEDIUM"
+    if has_order_alert(order_row):
+        insert_alert(conn, build_order_alert(order_row))
 
-    if order["amount"] >= HIGH_AMOUNT_THRESHOLD:
-        alert_types.append("HIGH_AMOUNT")
-        reasons.append(f"单笔订单金额 {order['amount']:.2f} 元，超过 {HIGH_AMOUNT_THRESHOLD} 元阈值")
-        risk_level = "HIGH"
-    if order["payment_status"] == "FAILED":
-        alert_types.append("PAYMENT_FAILED")
-        reasons.append("订单支付状态为 FAILED")
-    if order["device_id"] in RISKY_DEVICES:
-        alert_types.append("RISKY_DEVICE")
-        reasons.append(f"命中风险设备 {order['device_id']}")
-        risk_level = "HIGH"
-    if order["ip_address"] in RISKY_IPS:
-        alert_types.append("RISKY_IP")
-        reasons.append(f"命中风险 IP {order['ip_address']}")
-        risk_level = "HIGH"
+    return order_row
 
-    if alert_types:
-        alert_type = "+".join(alert_types)
 
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO alerts (
-                alert_id, order_id, user_id, alert_type, risk_level, reason, amount, event_time
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"A-{order['order_id']}-{alert_type}".replace("+", "-"),
-                order["order_id"],
-                order["user_id"],
-                alert_type,
-                risk_level,
-                "；".join(reasons),
-                order["amount"],
-                order["event_time"],
-            ),
-        )
+def insert_window_alerts(conn: sqlite3.Connection, orders: list[tuple], window_seconds: int = 10) -> None:
+    user_windows: dict[tuple[str, int], list[tuple]] = {}
+    ip_windows: dict[tuple[str, int], list[tuple]] = {}
+    device_windows: dict[tuple[str, int], list[tuple]] = {}
+    window_size_millis = window_seconds * 1000
+
+    for order in orders:
+        event_millis = parse_event_time_millis(order[EVENT_TIME])
+        window_start = event_millis - event_millis % window_size_millis
+        window_end = window_start + window_size_millis
+        user_windows.setdefault((order[USER_ID], window_end), []).append(order)
+        ip_windows.setdefault((order[IP_ADDRESS], window_end), []).append(order)
+        device_windows.setdefault((order[DEVICE_ID], window_end), []).append(order)
+
+    for (user_id, window_end), grouped_orders in user_windows.items():
+        window_start = window_end - window_size_millis
+        for alert in build_user_behavior_alerts(
+            user_id,
+            grouped_orders,
+            format_millis(window_start),
+            format_millis(window_end),
+            window_end,
+        ):
+            insert_alert(conn, alert)
+
+    for (ip_address, window_end), grouped_orders in ip_windows.items():
+        window_start = window_end - window_size_millis
+        for alert in build_shared_identity_alerts(
+            ip_address,
+            grouped_orders,
+            format_millis(window_start),
+            format_millis(window_end),
+            window_end,
+            threshold=4,
+            alert_prefix="SHAREDIP",
+            alert_type="SHARED_IP_USERS",
+            identity_label="IP",
+        ):
+            insert_alert(conn, alert)
+
+    for (device_id, window_end), grouped_orders in device_windows.items():
+        window_start = window_end - window_size_millis
+        for alert in build_shared_identity_alerts(
+            device_id,
+            grouped_orders,
+            format_millis(window_start),
+            format_millis(window_end),
+            window_end,
+            threshold=3,
+            alert_prefix="SHAREDDEV",
+            alert_type="SHARED_DEVICE_USERS",
+            identity_label="设备",
+        ):
+            insert_alert(conn, alert)
 
 
 def insert_window_metrics(conn: sqlite3.Connection, windows: int) -> None:
@@ -142,11 +187,13 @@ def seed(rows: int, windows: int, reset: bool) -> None:
             reset_tables(conn)
 
         base_time = datetime.now() - timedelta(minutes=5)
+        order_rows = []
         for idx in range(1, rows + 1):
             order = make_order(idx)
             order["event_time"] = (base_time + timedelta(seconds=idx * 3)).strftime("%Y-%m-%d %H:%M:%S")
-            insert_order(conn, order)
+            order_rows.append(insert_order(conn, order))
 
+        insert_window_alerts(conn, order_rows)
         insert_window_metrics(conn, windows)
         conn.commit()
 
