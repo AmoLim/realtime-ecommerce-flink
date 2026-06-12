@@ -59,7 +59,7 @@
       <main class="dashboard">
         <header class="topbar">
           <div>
-            <p class="eyebrow">PyFlink 实时计算大屏</p>
+            <p class="eyebrow">PyFlink 事件时间实时计算大屏</p>
             <h1>电商订单监控与异常交易预警</h1>
           </div>
           <div class="status"><span :class="['status-dot', healthy ? 'ok' : '']"></span><span>{{ healthy ? '后端在线' : '连接中断' }}</span></div>
@@ -68,7 +68,7 @@
         <section class="metrics-grid">
           <article class="metric-card"><span>累计订单</span><strong>{{ formatInteger(summary.total_orders) }}</strong><small>最新窗口 {{ formatInteger(summary.latest_window_orders) }} 单</small></article>
           <article class="metric-card"><span>累计销售额</span><strong>¥{{ formatMoney(summary.total_sales) }}</strong><small>最新窗口 ¥{{ formatMoney(summary.latest_window_sales) }}</small></article>
-          <article class="metric-card"><span>异常告警</span><strong>{{ formatInteger(summary.alert_count) }}</strong><small>大额 / 支付 / 设备 / IP / 高频</small></article>
+          <article class="metric-card"><span>异常告警</span><strong>{{ formatInteger(summary.alert_count) }}</strong><small>支付 / 设备 / IP / 高频 / 共享 / 跳变</small></article>
           <article class="metric-card"><span>最新窗口结束</span><strong class="time-value">{{ summary.latest_window_end || '--' }}</strong><small>Flink 最新聚合窗口</small></article>
         </section>
 

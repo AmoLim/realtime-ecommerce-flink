@@ -8,10 +8,17 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data" / "ecommerce_monitor.db"
+DEFAULT_KAFKA_CONNECTOR_JAR = PROJECT_ROOT / "lib" / "flink-sql-connector-kafka-4.0.0-2.0.jar"
 
-HIGH_AMOUNT_THRESHOLD = 5000
 RISKY_DEVICES = {"D-RISK-001", "D-RISK-002", "D-RISK-003"}
 RISKY_IPS = {"10.10.8.8", "10.10.9.9", "172.16.66.6"}
+
+DEFAULT_FREQUENCY_THRESHOLD = 6
+DEFAULT_FAILED_PAYMENT_THRESHOLD = 3
+DEFAULT_DEVICE_HOP_THRESHOLD = 3
+DEFAULT_CITY_HOP_THRESHOLD = 3
+DEFAULT_SHARED_IP_USER_THRESHOLD = 4
+DEFAULT_SHARED_DEVICE_USER_THRESHOLD = 3
 
 ORDER_ID = 0
 USER_ID = 1
@@ -150,6 +157,10 @@ def format_millis(epoch_millis):
     return datetime.fromtimestamp(epoch_millis / 1000).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def parse_event_time_millis(event_time):
+    return int(datetime.strptime(event_time, "%Y-%m-%d %H:%M:%S").timestamp() * 1000)
+
+
 def create_socket_text_stream(env, host, port, type_info):
     if hasattr(env, "socket_text_stream"):
         return env.socket_text_stream(host, port)
@@ -174,6 +185,43 @@ def create_socket_text_stream(env, host, port, type_info):
     raise RuntimeError("Could not create a socket text source for this PyFlink version.") from last_error
 
 
+def create_kafka_text_stream(env, bootstrap_servers, topic, group_id, offset, type_info):
+    from pyflink.common.serialization import SimpleStringSchema
+    from pyflink.common.watermark_strategy import WatermarkStrategy
+    from pyflink.datastream.connectors.kafka import KafkaOffsetsInitializer, KafkaSource
+
+    offset_initializers = {
+        "earliest": KafkaOffsetsInitializer.earliest,
+        "latest": KafkaOffsetsInitializer.latest,
+    }
+    try:
+        source = (
+            KafkaSource.builder()
+            .set_bootstrap_servers(bootstrap_servers)
+            .set_topics(topic)
+            .set_group_id(group_id)
+            .set_starting_offsets(offset_initializers[offset]())
+            .set_value_only_deserializer(SimpleStringSchema())
+            .build()
+        )
+    except Exception as exc:
+        message = str(exc)
+        if (
+            "Could not found the Java class" in message
+            or "NoClassDefFoundError" in message
+            or "ClassNotFoundException" in message
+        ):
+            raise RuntimeError(
+                "Flink Kafka connector JAR is missing or incomplete in the PyFlink Java classpath. "
+                "Use the fat SQL connector JAR, not the thin flink-connector-kafka JAR. "
+                "Run: python -m pip install -r requirements-flink.txt && "
+                "scripts/install_flink_kafka_connector.sh, then restart this job. "
+                f"Default JAR path: {DEFAULT_KAFKA_CONNECTOR_JAR}"
+            ) from exc
+        raise
+    return env.from_source(source, WatermarkStrategy.no_watermarks(), "kafka-order-source", type_info=type_info)
+
+
 def save_order(order):
     with get_conn() as conn:
         conn.execute(
@@ -190,12 +238,7 @@ def save_order(order):
 
 
 def has_order_alert(order):
-    return (
-        float(order[AMOUNT]) >= HIGH_AMOUNT_THRESHOLD
-        or order[PAYMENT_STATUS] == "FAILED"
-        or order[DEVICE_ID] in RISKY_DEVICES
-        or order[IP_ADDRESS] in RISKY_IPS
-    )
+    return order[PAYMENT_STATUS] == "FAILED" or order[DEVICE_ID] in RISKY_DEVICES or order[IP_ADDRESS] in RISKY_IPS
 
 
 def build_order_alert(order):
@@ -204,10 +247,6 @@ def build_order_alert(order):
     risk_level = "MEDIUM"
     amount = float(order[AMOUNT])
 
-    if amount >= HIGH_AMOUNT_THRESHOLD:
-        alert_types.append("HIGH_AMOUNT")
-        reasons.append(f"单笔订单金额 {amount:.2f} 元，超过 {HIGH_AMOUNT_THRESHOLD} 元阈值")
-        risk_level = "HIGH"
     if order[PAYMENT_STATUS] == "FAILED":
         alert_types.append("PAYMENT_FAILED")
         reasons.append("订单支付状态为 FAILED")
@@ -236,6 +275,143 @@ def build_order_alert(order):
 
 def save_order_alert(order):
     return save_alert_record(build_order_alert(order))
+
+
+def summarize_orders(orders):
+    order_count = len(orders)
+    total_amount = round(sum(float(order[AMOUNT]) for order in orders), 2)
+    latest_order = max(orders, key=lambda order: order[EVENT_TIME]) if orders else None
+    return order_count, total_amount, latest_order
+
+
+def window_alert(alert_id, order_id, user_id, alert_type, risk_level, reason, amount, event_time):
+    return (alert_id, order_id, user_id, alert_type, risk_level, reason, round(float(amount), 2), event_time)
+
+
+def build_user_behavior_alerts(
+    user_id,
+    orders,
+    window_start,
+    window_end,
+    window_end_millis,
+    frequency_threshold=DEFAULT_FREQUENCY_THRESHOLD,
+    failed_payment_threshold=DEFAULT_FAILED_PAYMENT_THRESHOLD,
+    device_hop_threshold=DEFAULT_DEVICE_HOP_THRESHOLD,
+    city_hop_threshold=DEFAULT_CITY_HOP_THRESHOLD,
+):
+    order_count, total_amount, latest_order = summarize_orders(orders)
+    if not order_count:
+        return []
+
+    latest_order_id = latest_order[ORDER_ID]
+    latest_event_time = latest_order[EVENT_TIME]
+    failed_count = sum(1 for order in orders if order[PAYMENT_STATUS] == "FAILED")
+    devices = {order[DEVICE_ID] for order in orders}
+    cities = {order[CITY] for order in orders}
+    alerts = []
+
+    if order_count >= frequency_threshold:
+        risk_level = "HIGH" if order_count >= frequency_threshold * 2 else "MEDIUM"
+        reason = f"用户在 {window_start} 至 {window_end} 内下单 {order_count} 次，达到高频阈值 {frequency_threshold}"
+        alerts.append(
+            window_alert(
+                f"A-FREQ-{user_id}-{window_end_millis}",
+                latest_order_id,
+                user_id,
+                "FREQUENT_USER_ORDERS",
+                risk_level,
+                reason,
+                total_amount,
+                latest_event_time,
+            )
+        )
+
+    if failed_count >= failed_payment_threshold:
+        risk_level = "HIGH" if failed_count == order_count or failed_count >= failed_payment_threshold * 2 else "MEDIUM"
+        reason = f"用户在 {window_start} 至 {window_end} 内支付失败 {failed_count} 次，达到失败支付阈值 {failed_payment_threshold}"
+        alerts.append(
+            window_alert(
+                f"A-FAIL-{user_id}-{window_end_millis}",
+                latest_order_id,
+                user_id,
+                "REPEATED_PAYMENT_FAILURES",
+                risk_level,
+                reason,
+                total_amount,
+                latest_event_time,
+            )
+        )
+
+    if len(devices) >= device_hop_threshold:
+        risk_level = "HIGH" if len(devices) >= device_hop_threshold + 2 else "MEDIUM"
+        reason = f"用户在 {window_start} 至 {window_end} 内切换 {len(devices)} 个设备，达到设备跳变阈值 {device_hop_threshold}"
+        alerts.append(
+            window_alert(
+                f"A-DEVHOP-{user_id}-{window_end_millis}",
+                latest_order_id,
+                user_id,
+                "DEVICE_HOPPING",
+                risk_level,
+                reason,
+                total_amount,
+                latest_event_time,
+            )
+        )
+
+    if len(cities) >= city_hop_threshold:
+        risk_level = "HIGH" if len(cities) >= city_hop_threshold + 2 else "MEDIUM"
+        reason = f"用户在 {window_start} 至 {window_end} 内跨 {len(cities)} 个城市下单，达到异地跳变阈值 {city_hop_threshold}"
+        alerts.append(
+            window_alert(
+                f"A-GEO-{user_id}-{window_end_millis}",
+                latest_order_id,
+                user_id,
+                "GEO_VELOCITY",
+                risk_level,
+                reason,
+                total_amount,
+                latest_event_time,
+            )
+        )
+
+    return alerts
+
+
+def build_shared_identity_alerts(
+    identity_value,
+    orders,
+    window_start,
+    window_end,
+    window_end_millis,
+    threshold,
+    alert_prefix,
+    alert_type,
+    identity_label,
+):
+    order_count, total_amount, latest_order = summarize_orders(orders)
+    if not order_count:
+        return []
+
+    users = {order[USER_ID] for order in orders}
+    if len(users) < threshold:
+        return []
+
+    risk_level = "HIGH" if len(users) >= threshold + 2 else "MEDIUM"
+    latest_order_id = latest_order[ORDER_ID]
+    latest_event_time = latest_order[EVENT_TIME]
+    reason = f"同一{identity_label} {identity_value} 在 {window_start} 至 {window_end} 内关联 {len(users)} 个用户，达到共享身份阈值 {threshold}"
+    return [
+        window_alert(
+            f"A-{alert_prefix}-{identity_value}-{window_end_millis}",
+            latest_order_id,
+            ",".join(sorted(users)),
+            alert_type,
+            risk_level,
+            reason,
+            total_amount,
+            latest_event_time,
+        )
+    ]
 
 
 def save_alert_record(alert):
@@ -292,23 +468,43 @@ def save_city_metric(metric):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="PyFlink realtime ecommerce order monitor.")
+    parser.add_argument("--source", choices=["socket", "kafka"], default="socket", help="Realtime input source.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9999)
+    parser.add_argument("--kafka-bootstrap-servers", default="127.0.0.1:9092")
+    parser.add_argument("--kafka-topic", default="ecommerce-orders")
+    parser.add_argument("--kafka-group-id", default="ecommerce-monitor")
+    parser.add_argument("--kafka-offset", choices=["earliest", "latest"], default="latest")
+    parser.add_argument("--kafka-connector-jar", default="", help="Optional local Flink Kafka connector JAR path.")
     parser.add_argument("--window-seconds", type=int, default=10)
-    parser.add_argument("--frequency-threshold", type=int, default=6)
+    parser.add_argument("--watermark-delay-seconds", type=int, default=3)
+    parser.add_argument("--frequency-threshold", type=int, default=DEFAULT_FREQUENCY_THRESHOLD)
+    parser.add_argument("--failed-payment-threshold", type=int, default=DEFAULT_FAILED_PAYMENT_THRESHOLD)
+    parser.add_argument("--device-hop-threshold", type=int, default=DEFAULT_DEVICE_HOP_THRESHOLD)
+    parser.add_argument("--city-hop-threshold", type=int, default=DEFAULT_CITY_HOP_THRESHOLD)
+    parser.add_argument("--shared-ip-user-threshold", type=int, default=DEFAULT_SHARED_IP_USER_THRESHOLD)
+    parser.add_argument("--shared-device-user-threshold", type=int, default=DEFAULT_SHARED_DEVICE_USER_THRESHOLD)
     return parser.parse_args()
 
 
 def main():
+    args = parse_args()
+
     try:
         from pyflink.common import Types
+        from pyflink.common.time import Duration
         from pyflink.common.time import Time
+        from pyflink.common.watermark_strategy import TimestampAssigner, WatermarkStrategy
         from pyflink.datastream import StreamExecutionEnvironment
         from pyflink.datastream.functions import ProcessWindowFunction
-        from pyflink.datastream.window import TumblingProcessingTimeWindows
+        from pyflink.datastream.window import TumblingEventTimeWindows
     except ImportError as exc:
         print("PyFlink is not installed. Activate your conda env or run: pip install -r requirements-flink.txt", file=sys.stderr)
         raise exc
+
+    class OrderEventTimeAssigner(TimestampAssigner):
+        def extract_timestamp(self, value, record_timestamp):
+            return parse_event_time_millis(value[EVENT_TIME])
 
     class SalesWindowFunction(ProcessWindowFunction):
         def process(self, key, context, elements):
@@ -352,44 +548,59 @@ def main():
                 window = context.window()
                 yield (format_millis(window.start), format_millis(window.end), key, order_count, round(total_amount, 2))
 
-    class UserFrequencyWindowFunction(ProcessWindowFunction):
-        def __init__(self, threshold):
-            self.threshold = threshold
+    class UserBehaviorWindowFunction(ProcessWindowFunction):
+        def __init__(self, frequency_threshold, failed_payment_threshold, device_hop_threshold, city_hop_threshold):
+            self.frequency_threshold = frequency_threshold
+            self.failed_payment_threshold = failed_payment_threshold
+            self.device_hop_threshold = device_hop_threshold
+            self.city_hop_threshold = city_hop_threshold
 
         def process(self, key, context, elements):
-            order_count = 0
-            total_amount = 0.0
-            latest_event_time = ""
-            latest_order_id = ""
-            for order in elements:
-                order_count += 1
-                total_amount += float(order[AMOUNT])
-                latest_event_time = order[EVENT_TIME]
-                latest_order_id = order[ORDER_ID]
+            window = context.window()
+            orders = list(elements)
+            yield from build_user_behavior_alerts(
+                key,
+                orders,
+                format_millis(window.start),
+                format_millis(window.end),
+                window.end,
+                self.frequency_threshold,
+                self.failed_payment_threshold,
+                self.device_hop_threshold,
+                self.city_hop_threshold,
+            )
 
-            if order_count >= self.threshold:
-                window = context.window()
-                window_end = format_millis(window.end)
-                risk_level = "HIGH" if order_count >= self.threshold * 2 else "MEDIUM"
-                alert_id = f"A-FREQ-{key}-{window.end}"
-                reason = f"用户在 {format_millis(window.start)} 至 {window_end} 内下单 {order_count} 次，达到高频阈值 {self.threshold}"
-                yield (
-                    alert_id,
-                    latest_order_id or f"WINDOW-{key}-{window.end}",
-                    key,
-                    "FREQUENT_USER_ORDERS",
-                    risk_level,
-                    reason,
-                    round(total_amount, 2),
-                    latest_event_time or window_end,
-                )
+    class SharedIdentityWindowFunction(ProcessWindowFunction):
+        def __init__(self, threshold, alert_prefix, alert_type, identity_label):
+            self.threshold = threshold
+            self.alert_prefix = alert_prefix
+            self.alert_type = alert_type
+            self.identity_label = identity_label
 
-    args = parse_args()
+        def process(self, key, context, elements):
+            window = context.window()
+            orders = list(elements)
+            yield from build_shared_identity_alerts(
+                key,
+                orders,
+                format_millis(window.start),
+                format_millis(window.end),
+                window.end,
+                self.threshold,
+                self.alert_prefix,
+                self.alert_type,
+                self.identity_label,
+            )
+
     initialize_database()
 
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_parallelism(1)
     env.set_python_executable(sys.executable)
+    env.get_config().set_auto_watermark_interval(1000)
+    kafka_connector_jar = Path(args.kafka_connector_jar).resolve() if args.kafka_connector_jar else DEFAULT_KAFKA_CONNECTOR_JAR
+    if args.source == "kafka" and kafka_connector_jar.exists():
+        env.add_jars(kafka_connector_jar.as_uri())
 
     order_type = Types.TUPLE(
         [
@@ -423,16 +634,29 @@ def main():
         ]
     )
 
-    orders = (
-        create_socket_text_stream(env, args.host, args.port, Types.STRING())
-        .filter(is_json_line)
-        .map(parse_order, output_type=order_type)
+    if args.source == "kafka":
+        raw_orders = create_kafka_text_stream(
+            env,
+            args.kafka_bootstrap_servers,
+            args.kafka_topic,
+            args.kafka_group_id,
+            args.kafka_offset,
+            Types.STRING(),
+        )
+    else:
+        raw_orders = create_socket_text_stream(env, args.host, args.port, Types.STRING())
+
+    watermark_strategy = WatermarkStrategy.for_bounded_out_of_orderness(
+        Duration.of_seconds(args.watermark_delay_seconds)
+    ).with_timestamp_assigner(OrderEventTimeAssigner())
+    orders = raw_orders.filter(is_json_line).map(parse_order, output_type=order_type).assign_timestamps_and_watermarks(
+        watermark_strategy
     )
 
     orders.map(save_order, output_type=Types.STRING()).print()
     orders.filter(has_order_alert).map(save_order_alert, output_type=Types.STRING()).print()
 
-    window_assigner = TumblingProcessingTimeWindows.of(Time.seconds(args.window_seconds))
+    window_assigner = TumblingEventTimeWindows.of(Time.seconds(args.window_seconds))
 
     (
         orders.key_by(lambda order: "sales")
@@ -461,7 +685,47 @@ def main():
     (
         orders.key_by(lambda order: order[USER_ID])
         .window(window_assigner)
-        .process(UserFrequencyWindowFunction(args.frequency_threshold), output_type=alert_type)
+        .process(
+            UserBehaviorWindowFunction(
+                args.frequency_threshold,
+                args.failed_payment_threshold,
+                args.device_hop_threshold,
+                args.city_hop_threshold,
+            ),
+            output_type=alert_type,
+        )
+        .map(save_alert_record, output_type=Types.STRING())
+        .print()
+    )
+
+    (
+        orders.key_by(lambda order: order[IP_ADDRESS])
+        .window(window_assigner)
+        .process(
+            SharedIdentityWindowFunction(
+                args.shared_ip_user_threshold,
+                "SHAREDIP",
+                "SHARED_IP_USERS",
+                "IP",
+            ),
+            output_type=alert_type,
+        )
+        .map(save_alert_record, output_type=Types.STRING())
+        .print()
+    )
+
+    (
+        orders.key_by(lambda order: order[DEVICE_ID])
+        .window(window_assigner)
+        .process(
+            SharedIdentityWindowFunction(
+                args.shared_device_user_threshold,
+                "SHAREDDEV",
+                "SHARED_DEVICE_USERS",
+                "设备",
+            ),
+            output_type=alert_type,
+        )
         .map(save_alert_record, output_type=Types.STRING())
         .print()
     )
