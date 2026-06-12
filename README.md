@@ -45,7 +45,7 @@ realtime-ecommerce-flink/
 所有终端都先进入项目目录；下面命令使用你当前项目的本机路径：
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 ```
 
@@ -60,7 +60,7 @@ python -c "import pyflink; print(pyflink.__file__)"
 `requirements-flink.txt` 固定使用 `apache-flink==2.0.0`，因为当前 PyFlink 2.2.x 暂无可用的 Kafka connector JAR。Kafka 链路还需要下载 Flink Kafka connector：
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 python -m pip install --force-reinstall -r requirements-flink.txt
 scripts/install_flink_kafka_connector.sh
@@ -69,7 +69,7 @@ scripts/install_flink_kafka_connector.sh
 前端首次运行安装 Node 依赖：
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink/frontend
+cd /YOURPATH/realtime-ecommerce-flink/frontend
 npm install
 ```
 
@@ -80,7 +80,7 @@ npm install
 终端 1：初始化数据库，写入演示数据，启动 FastAPI 后端。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 python scripts/init_db.py
 python scripts/seed_demo_data.py
@@ -90,7 +90,7 @@ python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 终端 2：启动 Vue/Vite 前端。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink/frontend
+cd /YOURPATH/realtime-ecommerce-flink/frontend
 npm install
 npm run dev
 ```
@@ -104,7 +104,7 @@ npm run dev
 如果后端端口不是 `8000`，前端可以这样指定 API 地址：
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink/frontend
+cd /YOURPATH/realtime-ecommerce-flink/frontend
 VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
 ```
 
@@ -119,7 +119,7 @@ Python 订单生成器 -> Socket 9999 -> PyFlink 作业 -> SQLite -> FastAPI 后
 终端 1：启动 socket 订单流生成器。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 python generator/order_stream_generator.py \
   --sink socket \
@@ -133,7 +133,7 @@ python generator/order_stream_generator.py \
 终端 2：启动 PyFlink 作业，从 socket 读取订单并写入 SQLite。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 python scripts/init_db.py
 python flink_jobs/order_stream_job.py \
@@ -148,7 +148,7 @@ python flink_jobs/order_stream_job.py \
 终端 3：启动 FastAPI 后端。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -156,7 +156,7 @@ python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 终端 4：启动 Vue/Vite 前端。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink/frontend
+cd /YOURPATH/realtime-ecommerce-flink/frontend
 npm install
 npm run dev
 ```
@@ -174,7 +174,7 @@ Python 订单生成器 -> Kafka ecommerce-orders -> PyFlink KafkaSource -> SQLit
 本项目提供了 `scripts/kafka_demo.sh` 帮助本地 Kafka 4.x/KRaft 演示：发现 Kafka 命令、格式化 KRaft 存储、启动 broker、创建 topic、检查连通性。你的 Kafka 4.3 如果是 Homebrew 安装，使用下面的 `KAFKA_HOME`：
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 export KAFKA_HOME=/opt/homebrew/opt/kafka
 scripts/kafka_demo.sh info
@@ -195,7 +195,7 @@ export KAFKA_CONFIG=/path/to/server.properties
 首次运行 Kafka 4.x/KRaft 时，先格式化本地存储；同一份 `server.properties` 只需要做一次：
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 export KAFKA_HOME=/opt/homebrew/opt/kafka
 scripts/kafka_demo.sh format
 ```
@@ -203,7 +203,7 @@ scripts/kafka_demo.sh format
 终端 1：启动 Kafka broker，保持这个终端运行。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 export KAFKA_HOME=/opt/homebrew/opt/kafka
 scripts/kafka_demo.sh start
 ```
@@ -211,7 +211,7 @@ scripts/kafka_demo.sh start
 终端 2：确认 Kafka 可连接，并创建演示 topic。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 export KAFKA_HOME=/opt/homebrew/opt/kafka
 scripts/kafka_demo.sh status
 scripts/kafka_demo.sh topic
@@ -220,7 +220,7 @@ scripts/kafka_demo.sh topic
 终端 3：启动 Kafka 生产模式，持续把订单 JSON 写入 `ecommerce-orders`。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 python generator/order_stream_generator.py \
   --sink kafka \
@@ -232,7 +232,7 @@ python generator/order_stream_generator.py \
 如果想确认 Kafka topic 中有消息，可以临时开一个消费者观察前 5 条消息：
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 export KAFKA_HOME=/opt/homebrew/opt/kafka
 scripts/kafka_demo.sh consume
 ```
@@ -240,7 +240,7 @@ scripts/kafka_demo.sh consume
 终端 4：启动 Kafka 输入模式的 PyFlink 作业。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 python scripts/init_db.py
 python flink_jobs/order_stream_job.py \
@@ -256,7 +256,7 @@ python flink_jobs/order_stream_job.py \
 如果运行时报 Kafka connector 类不存在，说明当前 PyFlink 环境只有 Python API，没有把 Flink Kafka connector JAR 放进 Java classpath。先安装项目推荐的 PyFlink 版本并下载 connector：
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 python -m pip install --force-reinstall -r requirements-flink.txt
 scripts/install_flink_kafka_connector.sh
@@ -265,7 +265,7 @@ scripts/install_flink_kafka_connector.sh
 脚本会下载到 `lib/flink-sql-connector-kafka-4.0.0-2.0.jar`，作业启动时会自动加载它。注意不要使用 `flink-connector-kafka-*.jar` 薄 JAR，否则会缺少 Kafka Java client 依赖。也可以显式把路径传给作业：
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 python flink_jobs/order_stream_job.py \
   --source kafka \
@@ -275,13 +275,13 @@ python flink_jobs/order_stream_job.py \
   --kafka-offset latest \
   --window-seconds 10 \
   --watermark-delay-seconds 3 \
-  --kafka-connector-jar /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink/lib/flink-sql-connector-kafka-4.0.0-2.0.jar
+  --kafka-connector-jar /YOURPATH/realtime-ecommerce-flink/lib/flink-sql-connector-kafka-4.0.0-2.0.jar
 ```
 
 终端 5：启动 FastAPI 后端。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink
+cd /YOURPATH/realtime-ecommerce-flink
 conda activate pyflink
 python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 ```
@@ -289,7 +289,7 @@ python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 终端 6：启动 Vue/Vite 前端。
 
 ```bash
-cd /Users/amo/Documents/Coding/Code/BigData/realtime-ecommerce-flink/frontend
+cd /YOURPATH/realtime-ecommerce-flink/frontend
 npm install
 npm run dev
 ```
